@@ -1,0 +1,371 @@
+# AZSMZ ESP32 Matrix + 64x32 HUB75 panel — WiFi clock / message board
+# ESPHome 2026.9+ (native hub75 display component)
+#
+# What you get:
+#   - Clock (NTP, America/Chicago) with a seconds bar
+#   - Bottom line: your message (scrolls if it's too long) or the date
+#   - "Message" mode: big scrolling text
+#   - Standalone: no Home Assistant. Control from the web UI at
+#     http://matrix-clock.local (or the IP) or with curl:
+#       curl -d "" "http://matrix-clock.local/text/Message/set?value=Hello"
+#       curl -d "" "http://matrix-clock.local/text/Alert/set?value=Doorbell"
+#   - Entities: Message, Alert (+ Alert seconds), Display mode, Brightness,
+#     24-hour clock, free-heap diagnostics
+#   - WiFi setup: join the "Matrix Clock Setup" hotspot (password in
+#     secrets.yaml) and pick a network in the captive portal; or Improv
+#     over USB from https://web.esphome.io
+#   - Secrets (hotspot password, OTA key) live in secrets.yaml, which is
+#     not committed. Copy secrets.example.yaml to secrets.yaml first.
+#   - Buttons: on-board Flash (IO0) = next scene. External button on the
+#     header's IO21 to GND: click = next, double-click = previous,
+#     hold 1s = cycle brightness (low / medium / high)
+#   - Free-heap diagnostics in Home Assistant (the original ESP32 is tight on RAM)
+#   - OTA updates after the first USB flash
+
+substitutions:
+  name: matrix-clock
+  friendly_name: Matrix Clock
+  timezone: America/Chicago
+  ap_ssid: Matrix Clock Setup
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      # Re-apply the saved brightness after a reboot
+      - hub75.set_brightness:
+          id: matrix
+          brightness: !lambda "return (uint8_t) id(panel_brightness).state;"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    advanced:
+      # +40KB internal RAM. Needs the newer bootloader that the first USB
+      # flash installs; leave it on once the board has been USB-flashed.
+      sram1_as_iram: true
+
+logger:
+
+# No api: block on purpose. This is a standalone device with no Home
+# Assistant; firmware updates go over encrypted OTA with this key.
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret ota_key
+
+# No networks in YAML on purpose: credentials are entered on the device and
+# kept in flash. If the saved network disappears (new router, new SSID), the
+# setup AP comes back after a minute and the panel shows how to join it.
+wifi:
+  # Keep running (and keep time) if the WiFi drops instead of rebooting
+  # every 15 minutes; the setup AP still comes up when the network is gone.
+  reboot_timeout: 0s
+  ap:
+    ssid: ${ap_ssid}
+    password: !secret ap_password
+
+captive_portal:
+
+# No Bluetooth: the BLE stack doesn't fit in RAM next to the HUB75 DMA
+# buffers on the original ESP32 (it failed to start and starved the heap).
+
+# WiFi setup over USB from https://web.esphome.io
+improv_serial:
+
+web_server:
+  port: 80
+  ota: false  # keep firmware uploads on the encrypted path only
+
+debug:
+  update_interval: 30s
+
+sensor:
+  - platform: debug
+    free:
+      name: Free heap
+    block:
+      name: Largest free block
+
+time:
+  - platform: sntp
+    id: sntp_time
+    timezone: ${timezone}
+
+globals:
+  - id: alert_text
+    type: std::string
+    initial_value: '""'
+  - id: alert_until
+    type: uint32_t
+    initial_value: "0"
+
+text:
+  - platform: template
+    id: message
+    name: Message
+    mode: text
+    optimistic: true
+    restore_value: true
+    max_length: 100
+    initial_value: "Hello from ESPHome"
+
+  - platform: template
+    id: alert
+    name: Alert
+    mode: text
+    optimistic: true
+    max_length: 60
+    on_value:
+      then:
+        - lambda: |-
+            if (x.empty()) { id(alert_until) = 0; return; }
+            id(alert_text) = x;
+            id(alert_until) = millis() + (uint32_t) id(alert_seconds).state * 1000;
+
+select:
+  - platform: template
+    id: display_mode
+    name: Display mode
+    optimistic: true
+    restore_value: true
+    options:
+      - "Clock + Message"
+      - "Clock + Date"
+      - "Message"
+    initial_option: "Clock + Message"
+
+number:
+  - platform: template
+    id: panel_brightness
+    name: Brightness
+    mode: slider
+    min_value: 5
+    max_value: 255
+    step: 5
+    initial_value: 80
+    optimistic: true
+    restore_value: true
+    set_action:
+      - hub75.set_brightness:
+          id: matrix
+          brightness: !lambda "return (uint8_t) x;"
+
+  - platform: template
+    id: alert_seconds
+    name: Alert seconds
+    mode: box
+    min_value: 3
+    max_value: 600
+    step: 1
+    initial_value: 15
+    optimistic: true
+    restore_value: true
+
+switch:
+  - platform: template
+    id: clock_24h
+    name: 24-hour clock
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+binary_sensor:
+  # On-board Flash button (don't hold it while powering up: that enters the
+  # bootloader).
+  - platform: gpio
+    id: flash_button
+    name: Flash button
+    pin:
+      number: GPIO0
+      inverted: true
+      ignore_strapping_warning: true
+      mode:
+        input: true
+        pullup: true
+    on_click:
+      - select.next:
+          id: display_mode
+          cycle: true
+
+  # External momentary button: header pin IO21 to either GND pin.
+  - platform: gpio
+    id: ext_button
+    name: External button
+    pin:
+      number: GPIO21
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on_off: 20ms
+    on_multi_click:
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at most 0.35s
+          - ON for at most 0.5s
+          - OFF for at least 0.2s
+        then:
+          - select.previous:
+              id: display_mode
+              cycle: true
+      - timing:
+          - ON for at most 0.5s
+          - OFF for at least 0.35s
+        then:
+          - select.next:
+              id: display_mode
+              cycle: true
+      - timing:
+          - ON for at least 1s
+        then:
+          - number.set:
+              id: panel_brightness
+              value: !lambda |-
+                float b = id(panel_brightness).state;
+                if (b < 50) return 100;
+                if (b < 150) return 220;
+                return 30;
+
+color:
+  - id: c_clock
+    hex: FF8C00
+  - id: c_text
+    hex: 00C8FF
+  - id: c_alert
+    hex: FF3020
+  - id: c_dim
+    hex: 202020
+  - id: c_bar
+    hex: 503000
+
+font:
+  - id: font_big
+    file:
+      type: gfonts
+      family: Teko
+      weight: 600
+    size: 28
+    bpp: 4
+  - id: font_small
+    file:
+      type: gfonts
+      family: Silkscreen
+    size: 8
+    bpp: 1
+
+display:
+  - platform: hub75
+    id: matrix
+    panel_width: 64
+    panel_height: 32
+    double_buffer: true
+    brightness: 80
+    # Pin map verified on this hardware (photo-diagnosed 2026-10-13):
+    #  - The board is silkscreened V1.2 but its address/B2 wiring matches the
+    #    AZSMZ V1.5 table: B=GPIO13, D=GPIO27, B2=GPIO12.
+    #  - This panel has green and blue swapped, so the header's G pins feed
+    #    the blue LEDs and vice versa. G and B are swapped below to match.
+    #    For a standard RGB panel: g1=GPIO2, b1=GPIO16, g2=GPIO15, b2=GPIO12.
+    #  - E (GPIO22) is unused on 1/16-scan 64x32 panels.
+    r1_pin: GPIO17
+    g1_pin: GPIO16           # header B1
+    b1_pin:
+      number: GPIO2          # header G1
+      ignore_strapping_warning: true
+    r2_pin: GPIO4
+    g2_pin:
+      number: GPIO12         # header B2
+      ignore_strapping_warning: true
+    b2_pin:
+      number: GPIO15         # header G2
+      ignore_strapping_warning: true
+    a_pin: GPIO26
+    b_pin: GPIO13
+    c_pin: GPIO14
+    d_pin: GPIO27
+    lat_pin: GPIO33
+    oe_pin: GPIO32
+    clk_pin: GPIO25
+    lambda: |-
+      const int W = 64;
+      const uint32_t now_ms = millis();
+
+      // One line of text: centred if it fits, otherwise scrolls right-to-left.
+      auto line = [&](const std::string &s, font::Font *f, Color c, int baseline, uint32_t ms_per_px) {
+        if (s.empty()) return;
+        int x1, y1, w, h;
+        it.get_text_bounds(0, baseline, s.c_str(), f, TextAlign::BASELINE_LEFT, &x1, &y1, &w, &h);
+        if (w <= W) {
+          it.print(W / 2, baseline, f, c, TextAlign::BASELINE_CENTER, s.c_str());
+        } else {
+          int span = w + W;
+          int x = W - (int) ((now_ms / ms_per_px) % (uint32_t) span);
+          it.print(x, baseline, f, c, TextAlign::BASELINE_LEFT, s.c_str());
+        }
+      };
+
+      // 1) Not on WiFi: the panel explains how to set it up.
+      if (!wifi::global_wifi_component->is_connected()) {
+        if (wifi::global_wifi_component->is_ap_active()) {
+          it.print(W / 2, 8, id(font_small), id(c_clock), TextAlign::BASELINE_CENTER, "WIFI SETUP");
+          // The hotspot password is deliberately not shown on the panel.
+          line("JOIN WIFI \"${ap_ssid}\"", id(font_small), id(c_text), 19, 40);
+          it.print(W / 2, 30, id(font_small), id(c_clock), TextAlign::BASELINE_CENTER, "192.168.4.1");
+        } else {
+          it.print(W / 2, 19, id(font_small), id(c_text), TextAlign::BASELINE_CENTER, "CONNECTING");
+        }
+        return;
+      }
+
+      // 2) Alert set from the web UI or curl (Alert text entity).
+      if ((int32_t) (id(alert_until) - now_ms) > 0) {
+        line(id(alert_text), id(font_big), id(c_alert), 25, 20);
+        return;
+      }
+
+      auto idx = id(display_mode).active_index();
+      size_t mode = idx.has_value() ? *idx : 0;  // 0 clock+msg, 1 clock+date, 2 message
+
+      // 3) Big scrolling message.
+      if (mode == 2) {
+        line(id(message).state, id(font_big), id(c_text), 25, 20);
+        return;
+      }
+
+      // 4) Clock on top, message or date underneath.
+      auto t = id(sntp_time).now();
+      if (!t.is_valid()) {
+        it.print(W / 2, 20, id(font_big), id(c_dim), TextAlign::BASELINE_CENTER, "--:--");
+        line("SYNCING TIME", id(font_small), id(c_text), 31, 40);
+        return;
+      }
+
+      char hhmm[8];
+      if (id(clock_24h).state) {
+        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", t.hour, t.minute);
+      } else {
+        int h12 = t.hour % 12;
+        snprintf(hhmm, sizeof(hhmm), "%d:%02d", h12 == 0 ? 12 : h12, t.minute);
+      }
+      it.print(W / 2, 20, id(font_big), id(c_clock), TextAlign::BASELINE_CENTER, hhmm);
+
+      // Seconds bar: fills across the panel once a minute.
+      it.line(0, 22, W - 1, 22, id(c_dim));
+      int bar = (t.second * W) / 60;
+      if (bar > 0) it.line(0, 22, bar - 1, 22, id(c_bar));
+
+      static const char *DAYS[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+      static const char *MONS[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                   "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+      char date[16];
+      snprintf(date, sizeof(date), "%s %s %d", DAYS[(t.day_of_week + 6) % 7], MONS[(t.month + 11) % 12], t.day_of_month);
+
+      if (mode == 0 && !id(message).state.empty()) {
+        line(id(message).state, id(font_small), id(c_text), 31, 30);
+      } else {
+        line(date, id(font_small), id(c_text), 31, 30);
+      }

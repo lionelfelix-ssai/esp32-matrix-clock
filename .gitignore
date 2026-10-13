@@ -1,0 +1,11 @@
+# Secrets and local build state
+secrets.yaml
+.esphome/
+.venv/
+__pycache__/
+
+# Firmware images, logs, scratch
+*.bin
+*.log
+_to_delete/
+.DS_Store
