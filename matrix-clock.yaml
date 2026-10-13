@@ -2,15 +2,17 @@
 # ESPHome 2026.9+ (native hub75 display component)
 #
 # What you get:
-#   - Clock (NTP, America/Chicago) with a seconds bar
-#   - Bottom line: your message (scrolls if it's too long) or the date
-#   - "Message" mode: big scrolling text
+#   - Default screen "Dog + Weather": pixel-art dog on the left; time, current
+#     weather (icon + temperature for a US ZIP, via Open-Meteo, no API key)
+#     and a scrolling line on the right
+#   - Other screens: Clock + Message, Clock + Date, big scrolling Message
 #   - Standalone: no Home Assistant. Control from the web UI at
 #     http://matrix-clock.local (or the IP) or with curl:
-#       curl -d "" "http://matrix-clock.local/text/Message/set?value=Hello"
+#       curl -d "" "http://matrix-clock.local/text/Scroll%20text/set?value=Hello"
+#       curl -d "" "http://matrix-clock.local/text/Weather%20ZIP/set?value=78701"
 #       curl -d "" "http://matrix-clock.local/text/Alert/set?value=Doorbell"
-#   - Entities: Message, Alert (+ Alert seconds), Display mode, Brightness,
-#     24-hour clock, free-heap diagnostics
+#   - Entities: Scroll text, Weather ZIP, Weather (read-only), Alert
+#     (+ Alert seconds), Display mode, Brightness, 24-hour clock, free heap
 #   - WiFi setup: join the "Matrix Clock Setup" hotspot (password in
 #     secrets.yaml) and pick a network in the captive portal; or Improv
 #     over USB from https://web.esphome.io
@@ -19,7 +21,7 @@
 #   - Buttons: on-board Flash (IO0) = next scene. External button on the
 #     header's IO21 to GND: click = next, double-click = previous,
 #     hold 1s = cycle brightness (low / medium / high)
-#   - Free-heap diagnostics in Home Assistant (the original ESP32 is tight on RAM)
+#   - Free-heap diagnostics (the original ESP32 is tight on RAM)
 #   - OTA updates after the first USB flash
 
 substitutions:
@@ -64,6 +66,9 @@ wifi:
   # Keep running (and keep time) if the WiFi drops instead of rebooting
   # every 15 minutes; the setup AP still comes up when the network is gone.
   reboot_timeout: 0s
+  on_connect:
+    - delay: 10s
+    - script.execute: wx_update
   ap:
     ssid: ${ap_ssid}
     password: !secret ap_password
@@ -79,6 +84,129 @@ improv_serial:
 web_server:
   port: 80
   ota: false  # keep firmware uploads on the encrypted path only
+
+# Weather: Open-Meteo (free, no API key). The ZIP is geocoded once, then the
+# current conditions are fetched every 15 minutes. Requests run in the main
+# loop, so the scroll pauses for a second or two during each fetch.
+http_request:
+  timeout: 10s
+  watchdog_timeout: 20s  # TLS handshakes on the original ESP32 take a few seconds
+
+interval:
+  - interval: 15min
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - script.execute: wx_update
+
+script:
+  - id: wx_update
+    mode: single
+    then:
+      # 1) ZIP -> latitude/longitude (only when the ZIP changed or on boot)
+      - if:
+          condition:
+            lambda: "return std::isnan(id(wx_lat)) && !id(weather_zip).state.empty();"
+          then:
+            - http_request.get:
+                url: !lambda |-
+                  std::string q;
+                  for (char ch : id(weather_zip).state) {
+                    if (isalnum((unsigned char) ch)) { q += ch; }
+                    else { char e[4]; snprintf(e, sizeof(e), "%%%02X", (unsigned char) ch); q += e; }
+                  }
+                  return "https://geocoding-api.open-meteo.com/v1/search?count=1&country=US&format=json&name=" + q;
+                capture_response: true
+                max_response_buffer_size: 4kB
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) {
+                          ESP_LOGW("weather", "Geocoding HTTP %d", response->status_code);
+                          return;
+                        }
+                        bool found = json::parse_json(body, [](JsonObject root) -> bool {
+                          JsonArray res = root["results"].as<JsonArray>();
+                          if (res.isNull() || res.size() == 0) return false;
+                          JsonObject r = res[0].as<JsonObject>();
+                          id(wx_lat) = r["latitude"].as<float>();
+                          id(wx_lon) = r["longitude"].as<float>();
+                          id(wx_place) = r["name"].as<std::string>();
+                          return true;
+                        });
+                        if (!found) {
+                          ESP_LOGW("weather", "No location for '%s'", id(weather_zip).state.c_str());
+                          id(wx_place) = "ZIP NOT FOUND";
+                          id(wx_summary).publish_state("ZIP not found");
+                        } else {
+                          ESP_LOGI("weather", "%s -> %s (%.4f, %.4f)", id(weather_zip).state.c_str(),
+                                   id(wx_place).c_str(), id(wx_lat), id(wx_lon));
+                        }
+                on_error:
+                  then:
+                    - logger.log:
+                        level: WARN
+                        format: "Geocoding request failed"
+      # 2) Current conditions
+      - if:
+          condition:
+            lambda: "return !std::isnan(id(wx_lat));"
+          then:
+            - http_request.get:
+                url: !lambda |-
+                  char url[220];
+                  snprintf(url, sizeof(url),
+                           "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
+                           "&current=temperature_2m,weather_code,is_day&temperature_unit=fahrenheit",
+                           id(wx_lat), id(wx_lon));
+                  return std::string(url);
+                capture_response: true
+                max_response_buffer_size: 2kB
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code != 200) {
+                          ESP_LOGW("weather", "Forecast HTTP %d", response->status_code);
+                          return;
+                        }
+                        bool ok = json::parse_json(body, [](JsonObject root) -> bool {
+                          JsonObject cur = root["current"].as<JsonObject>();
+                          if (cur.isNull()) return false;
+                          id(wx_temp) = cur["temperature_2m"].as<float>();
+                          id(wx_code) = cur["weather_code"].as<int>();
+                          id(wx_day) = cur["is_day"].as<int>() == 1;
+                          return true;
+                        });
+                        if (!ok) { ESP_LOGW("weather", "Unexpected forecast response"); return; }
+                        int c = id(wx_code);
+                        const char *cond = "Rain";
+                        if (c == 0) cond = "Clear";
+                        else if (c <= 2) cond = "Partly cloudy";
+                        else if (c == 3) cond = "Cloudy";
+                        else if (c == 45 || c == 48) cond = "Fog";
+                        else if (c >= 51 && c <= 57) cond = "Drizzle";
+                        else if ((c >= 71 && c <= 77) || c == 85 || c == 86) cond = "Snow";
+                        else if (c >= 80 && c <= 82) cond = "Showers";
+                        else if (c >= 95) cond = "Thunderstorms";
+                        id(wx_cond) = cond;
+                        char sum[80];
+                        snprintf(sum, sizeof(sum), "%s: %d°F, %s", id(wx_place).c_str(),
+                                 (int) lroundf(id(wx_temp)), cond);
+                        id(wx_summary).publish_state(sum);
+                        ESP_LOGI("weather", "%s", sum);
+                on_error:
+                  then:
+                    - logger.log:
+                        level: WARN
+                        format: "Forecast request failed"
+
+text_sensor:
+  - platform: template
+    id: wx_summary
+    name: Weather
+    update_interval: never
 
 debug:
   update_interval: 30s
@@ -102,16 +230,61 @@ globals:
   - id: alert_until
     type: uint32_t
     initial_value: "0"
+  # Weather state, filled in by the wx_update script
+  - id: wx_lat
+    type: float
+    initial_value: "NAN"
+  - id: wx_lon
+    type: float
+    initial_value: "NAN"
+  - id: wx_temp
+    type: float
+    initial_value: "NAN"
+  - id: wx_code
+    type: int
+    initial_value: "-1"
+  - id: wx_day
+    type: bool
+    initial_value: "true"
+  - id: wx_place
+    type: std::string
+    initial_value: '""'
+  - id: wx_cond
+    type: std::string
+    initial_value: '""'
 
 text:
+  # The scrolling line. Empty = show the weather location, conditions and date.
   - platform: template
     id: message
-    name: Message
+    name: Scroll text
     mode: text
     optimistic: true
     restore_value: true
     max_length: 100
-    initial_value: "Hello from ESPHome"
+    initial_value: ""
+
+  - platform: template
+    id: weather_zip
+    name: Weather ZIP
+    mode: text
+    optimistic: true
+    restore_value: true
+    max_length: 10
+    initial_value: "78701"
+    on_value:
+      then:
+        - lambda: |-
+            id(wx_lat) = NAN;
+            id(wx_lon) = NAN;
+            id(wx_temp) = NAN;
+            id(wx_place) = "";
+            id(wx_cond) = "";
+        - if:
+            condition:
+              wifi.connected:
+            then:
+              - script.execute: wx_update
 
   - platform: template
     id: alert
@@ -133,10 +306,11 @@ select:
     optimistic: true
     restore_value: true
     options:
+      - "Dog + Weather"
       - "Clock + Message"
       - "Clock + Date"
       - "Message"
-    initial_option: "Clock + Message"
+    initial_option: "Dog + Weather"
 
 number:
   - platform: template
@@ -241,6 +415,52 @@ color:
     hex: 202020
   - id: c_bar
     hex: 503000
+  - id: c_temp
+    hex: DDDDDD
+
+# Panel art. Prepare new pictures with tools/prep_image.py (downscale + lift the
+# shadows so dark tones survive the panel's gamma).
+image:
+  - platform: file
+    id: img_dog
+    file: images/dog-2-32.png
+    type: RGB565
+  - platform: file
+    id: wx_clear_day
+    file: images/weather/clear_day.png
+    type: RGB565
+  - platform: file
+    id: wx_clear_night
+    file: images/weather/clear_night.png
+    type: RGB565
+  - platform: file
+    id: wx_partly_day
+    file: images/weather/partly_day.png
+    type: RGB565
+  - platform: file
+    id: wx_partly_night
+    file: images/weather/partly_night.png
+    type: RGB565
+  - platform: file
+    id: wx_cloudy
+    file: images/weather/cloudy.png
+    type: RGB565
+  - platform: file
+    id: wx_fog
+    file: images/weather/fog.png
+    type: RGB565
+  - platform: file
+    id: wx_rain
+    file: images/weather/rain.png
+    type: RGB565
+  - platform: file
+    id: wx_snow
+    file: images/weather/snow.png
+    type: RGB565
+  - platform: file
+    id: wx_storm
+    file: images/weather/storm.png
+    type: RGB565
 
 font:
   - id: font_big
@@ -250,6 +470,14 @@ font:
       weight: 600
     size: 28
     bpp: 4
+  - id: font_time
+    file:
+      type: gfonts
+      family: Teko
+      weight: 600
+    size: 16
+    bpp: 4
+    glyphs: "0123456789:-"
   - id: font_small
     file:
       type: gfonts
@@ -294,18 +522,23 @@ display:
       const int W = 64;
       const uint32_t now_ms = millis();
 
-      // One line of text: centred if it fits, otherwise scrolls right-to-left.
-      auto line = [&](const std::string &s, font::Font *f, Color c, int baseline, uint32_t ms_per_px) {
+      // Text in the window [x0, x0 + ww): centred if it fits, otherwise it
+      // scrolls right-to-left. Callers clip when the window isn't full width.
+      auto scroll_in = [&](const std::string &s, font::Font *f, Color c, int baseline,
+                           int x0, int ww, uint32_t ms_per_px) {
         if (s.empty()) return;
         int x1, y1, w, h;
         it.get_text_bounds(0, baseline, s.c_str(), f, TextAlign::BASELINE_LEFT, &x1, &y1, &w, &h);
-        if (w <= W) {
-          it.print(W / 2, baseline, f, c, TextAlign::BASELINE_CENTER, s.c_str());
+        if (w <= ww) {
+          it.print(x0 + ww / 2, baseline, f, c, TextAlign::BASELINE_CENTER, s.c_str());
         } else {
-          int span = w + W;
-          int x = W - (int) ((now_ms / ms_per_px) % (uint32_t) span);
+          int span = w + ww;
+          int x = x0 + ww - (int) ((now_ms / ms_per_px) % (uint32_t) span);
           it.print(x, baseline, f, c, TextAlign::BASELINE_LEFT, s.c_str());
         }
+      };
+      auto line = [&](const std::string &s, font::Font *f, Color c, int baseline, uint32_t ms_per_px) {
+        scroll_in(s, f, c, baseline, 0, W, ms_per_px);
       };
 
       // 1) Not on WiFi: the panel explains how to set it up.
@@ -327,29 +560,80 @@ display:
         return;
       }
 
-      auto idx = id(display_mode).active_index();
-      size_t mode = idx.has_value() ? *idx : 0;  // 0 clock+msg, 1 clock+date, 2 message
+      // Shared clock/date strings
+      auto t = id(sntp_time).now();
+      char hhmm[8] = "--:--";
+      char date[16] = "";
+      if (t.is_valid()) {
+        if (id(clock_24h).state) {
+          snprintf(hhmm, sizeof(hhmm), "%02d:%02d", t.hour, t.minute);
+        } else {
+          int h12 = t.hour % 12;
+          snprintf(hhmm, sizeof(hhmm), "%d:%02d", h12 == 0 ? 12 : h12, t.minute);
+        }
+        static const char *DAYS[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+        static const char *MONS[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                     "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+        snprintf(date, sizeof(date), "%s %s %d", DAYS[(t.day_of_week + 6) % 7],
+                 MONS[(t.month + 11) % 12], t.day_of_month);
+      }
 
-      // 3) Big scrolling message.
-      if (mode == 2) {
+      auto idx = id(display_mode).active_index();
+      // 0 dog+weather, 1 clock+message, 2 clock+date, 3 message
+      size_t mode = idx.has_value() ? *idx : 0;
+
+      // 3) Dog + Weather: dog left; time, weather and scroll text right.
+      if (mode == 0) {
+        it.image(0, 0, id(img_dog));
+        it.print(48, 13, id(font_time), t.is_valid() ? id(c_clock) : id(c_dim),
+                 TextAlign::BASELINE_CENTER, hhmm);
+
+        if (!std::isnan(id(wx_temp))) {
+          char tb[8];
+          snprintf(tb, sizeof(tb), "%d", (int) lroundf(id(wx_temp)));
+          int x1, y1, tw, th;
+          it.get_text_bounds(0, 22, tb, id(font_small), TextAlign::BASELINE_LEFT, &x1, &y1, &tw, &th);
+          int gx = 32 + (32 - (8 + 2 + tw + 4)) / 2;  // icon, gap, digits, degree mark
+          int c = id(wx_code);
+          bool day = id(wx_day);
+          image::Image *icon = id(wx_rain);  // drizzle, rain, showers
+          if (c == 0) icon = day ? id(wx_clear_day) : id(wx_clear_night);
+          else if (c <= 2) icon = day ? id(wx_partly_day) : id(wx_partly_night);
+          else if (c == 3) icon = id(wx_cloudy);
+          else if (c == 45 || c == 48) icon = id(wx_fog);
+          else if ((c >= 71 && c <= 77) || c == 85 || c == 86) icon = id(wx_snow);
+          else if (c >= 95) icon = id(wx_storm);
+          it.image(gx, 15, icon);
+          int tx = gx + 10;
+          it.print(tx, 22, id(font_small), id(c_temp), TextAlign::BASELINE_LEFT, tb);
+          it.rectangle(tx + tw + 1, 17, 3, 3, id(c_temp));  // degree mark
+        } else {
+          it.print(48, 22, id(font_small), id(c_dim), TextAlign::BASELINE_CENTER, "--");
+        }
+
+        std::string s = id(message).state;
+        if (s.empty()) {
+          s = id(wx_place);
+          if (!id(wx_cond).empty()) s += "  " + id(wx_cond);
+          if (date[0]) s += (s.empty() ? "" : "  ") + std::string(date);
+        }
+        it.start_clipping(32, 24, 64, 32);
+        scroll_in(s, id(font_small), id(c_text), 31, 32, 32, 30);
+        it.end_clipping();
+        return;
+      }
+
+      // 4) Big scrolling message.
+      if (mode == 3) {
         line(id(message).state, id(font_big), id(c_text), 25, 20);
         return;
       }
 
-      // 4) Clock on top, message or date underneath.
-      auto t = id(sntp_time).now();
+      // 5) Clock on top, message or date underneath.
       if (!t.is_valid()) {
         it.print(W / 2, 20, id(font_big), id(c_dim), TextAlign::BASELINE_CENTER, "--:--");
         line("SYNCING TIME", id(font_small), id(c_text), 31, 40);
         return;
-      }
-
-      char hhmm[8];
-      if (id(clock_24h).state) {
-        snprintf(hhmm, sizeof(hhmm), "%02d:%02d", t.hour, t.minute);
-      } else {
-        int h12 = t.hour % 12;
-        snprintf(hhmm, sizeof(hhmm), "%d:%02d", h12 == 0 ? 12 : h12, t.minute);
       }
       it.print(W / 2, 20, id(font_big), id(c_clock), TextAlign::BASELINE_CENTER, hhmm);
 
@@ -358,13 +642,7 @@ display:
       int bar = (t.second * W) / 60;
       if (bar > 0) it.line(0, 22, bar - 1, 22, id(c_bar));
 
-      static const char *DAYS[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
-      static const char *MONS[] = {"JAN", "FEB", "MAR", "APR", "MAY", "JUN",
-                                   "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
-      char date[16];
-      snprintf(date, sizeof(date), "%s %s %d", DAYS[(t.day_of_week + 6) % 7], MONS[(t.month + 11) % 12], t.day_of_month);
-
-      if (mode == 0 && !id(message).state.empty()) {
+      if (mode == 1 && !id(message).state.empty()) {
         line(id(message).state, id(font_small), id(c_text), 31, 30);
       } else {
         line(date, id(font_small), id(c_text), 31, 30);

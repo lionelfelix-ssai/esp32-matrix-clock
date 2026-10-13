@@ -1,17 +1,23 @@
 # esp32-matrix-clock
 
-Standalone WiFi clock and message board for the **AZSMZ ESP32 Matrix** controller driving a **64×32 HUB75** RGB LED panel. Built on [ESPHome](https://esphome.io) (2026.9+, native `hub75` display). No Home Assistant or cloud service required.
+Standalone WiFi clock, weather and message board for the **AZSMZ ESP32 Matrix** controller driving a **64×32 HUB75** RGB LED panel. Built on [ESPHome](https://esphome.io) (2026.9+, native `hub75` display). No Home Assistant, cloud account or API key required.
 
 ![Screens](docs/screens.png)
 
 ## Features
 
-- **Clock** from NTP (America/Chicago by default), 12/24-hour, with a seconds bar.
-- **Message line** under the clock. It is centred when it fits and scrolls when it doesn't. A **Message** mode shows it in a large scrolling font.
+- **Dog + Weather** (the default screen):
+  - A pixel-art dog on the left.
+  - On the right, the time, then the current weather for a US ZIP code (an icon and the temperature), then your scroll text.
+- **Weather** comes from [Open-Meteo](https://open-meteo.com), which is free and needs no key. It refreshes every 15 minutes, and immediately when you change the ZIP.
+- **Clock screens:**
+  - **Clock + Message** and **Clock + Date** show a big clock from NTP (America/Chicago), 12/24-hour, with a seconds bar.
+  - **Message** shows the scroll text in a large font.
+- **Scroll text** is set in the web UI. It is centred when it fits and scrolls when it doesn't. Leave it empty to show the weather location, conditions and date instead.
 - **Alerts:** a red pop-up for N seconds, set from the web UI or with one `curl`.
 - **Web UI** at `http://matrix-clock.local` (or the device IP), with a REST endpoint for every control.
 - **WiFi setup on the device itself.** With no known network, it starts a password-protected hotspot and captive portal, and the panel shows how to join.
-- **Buttons:** the on-board Flash button, plus one external button on IO21 (click, double-click and hold).
+- **Buttons:** the on-board Flash button, plus one external button on IO21 (click, double-click and hold). Both cycle through the screens.
 - **Encrypted OTA updates** after the first USB flash.
 - Settings (message, mode, brightness, 12/24h) survive reboots, and the clock keeps running through WiFi drop-outs.
 
@@ -72,24 +78,52 @@ Open `http://matrix-clock.local` (or the IP shown in your router). Every control
 
 ```bash
 H=http://matrix-clock.local
-curl -d "" "$H/text/Message/set?value=Dinner%20at%207"             # bottom line / Message mode
+curl -d "" "$H/text/Scroll%20text/set?value=Dinner%20at%207"       # scrolling line
+curl -d "" "$H/text/Weather%20ZIP/set?value=78701"                # weather location
+curl    "$H/text_sensor/Weather"                                  # e.g. "Austin: 94°F, Partly cloudy"
 curl -d "" "$H/text/Alert/set?value=Doorbell"                     # red pop-up
 curl -d "" "$H/number/Alert%20seconds/set?value=20"               # alert duration
-curl -d "" "$H/select/Display%20mode/set?option=Clock%20%2B%20Date"
+curl -d "" "$H/select/Display%20mode/set?option=Dog%20%2B%20Weather"
 curl -d "" "$H/number/Brightness/set?value=120"                   # 5-255
 curl -d "" "$H/switch/24-hour%20clock/turn_on"
 ```
 
 POSTs need a body (`-d ""`). Without one, the server rejects the request for a missing Content-Length.
 
-Display modes: **Clock + Message** (the date shows when the message is empty), **Clock + Date**, and **Message**.
+| Display mode | What's on it |
+|---|---|
+| **Dog + Weather** (default) | Dog on the left. On the right: time, weather icon and temperature, then the scroll text clipped to the right half |
+| **Clock + Message** | Big clock and seconds bar, with the scroll text underneath (the date if it's empty) |
+| **Clock + Date** | Big clock and seconds bar, with the date |
+| **Message** | Scroll text in the large font |
+
+## Weather
+
+- **How it works:** the device looks up the ZIP code once with Open-Meteo's geocoder, then fetches the current temperature (°F), WMO weather code and day/night every 15 minutes.
+- **Checking it:** the read-only **Weather** entity in the web UI shows what it last got, e.g. "Austin: 94°F, Partly cloudy".
+- **Icons:** clear (sun or moon), partly cloudy (day or night), cloudy, fog, rain (drizzle, rain and showers), snow and thunderstorm.
+- **Brief pauses:** requests run in ESPHome's main loop, and the original ESP32 takes a few seconds per HTTPS handshake. The scroll pauses for about 3 seconds per refresh, and about 6 seconds when the ZIP changes. Free heap stays around 150 KB.
+
+## Images
+
+Panel art lives in `images/`. The source dogs are 64×64 pixel art. `tools/prep_image.py` turns any image into panel-ready art:
+
+- It downscales with nearest-neighbour, which keeps pixel art crisp.
+- It lifts dark tones. Without that, the panel's CIE1931 gamma turns near-black (like the dog's black saddle) into off LEDs.
+- It flattens transparency onto black.
+
+```bash
+.venv/bin/python tools/prep_image.py images/dog-1.png images/dog-1-32.png --size 32x32
+```
+
+Then reference the new file in the `image:` block of `matrix-clock.yaml` and run an OTA update. The weather icons in `images/weather/` are 8×8 and hand-drawn.
 
 ## Buttons
 
 | Button | Action |
 |---|---|
-| On-board **Flash** (IO0) | Click: next scene |
-| External, **IO21 to GND** (4-pin header: GND, GND, IO21, 3.3V) | Click: next scene. Double-click: previous scene. Hold 1 s: brightness low/medium/high |
+| On-board **Flash** (IO0) | Click: next screen |
+| External, **IO21 to GND** (4-pin header: GND, GND, IO21, 3.3V) | Click: next screen. Double-click: previous screen. Hold 1 s: brightness low/medium/high |
 
 IO21 is the only spare GPIO on the board; everything else is used by the panel or the SD slot. The Flash button also has through-hole pads if you want to mount a front-panel button there. Don't hold Flash while powering up, because that enters the bootloader.
 
