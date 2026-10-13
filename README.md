@@ -148,7 +148,7 @@ OTA is encrypted with `ota_key` from `secrets.yaml`, and the web server's plaint
 - **No Home Assistant API.** It's a standalone device. With the API enabled, ESPHome reboots every 15 minutes when no client connects.
 - **WiFi `reboot_timeout: 0s`** keeps the clock running and keeping time if the network goes away.
 - **Smooth scrolling:** ESPHome's default display `update_interval` is 1 s, which makes scrolling text jump about 30 px at a time.
-  - The display now redraws every 30 ms (about 33 fps), and scrolling advances exactly 1 px per frame, so every step is the same size.
+  - The display now redraws every 30 ms (about 33 fps), and scrolling advances exactly 1 px every 2 frames (about 16 px/s), so every step is the same size. Change the last argument of the `line()`/`scroll_in()` calls to adjust the speed (1 = twice as fast).
   - `bit_depth: 7` doubles the panel refresh from 76 Hz to 152 Hz, so frames land evenly. It also frees about 30 KB of DMA RAM.
   - The scroll still pauses for a few seconds during each weather fetch.
 

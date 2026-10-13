@@ -558,7 +558,7 @@ display:
         if (wifi::global_wifi_component->is_ap_active()) {
           it.print(W / 2, 8, id(font_small), id(c_clock), TextAlign::BASELINE_CENTER, "WIFI SETUP");
           // The hotspot password is deliberately not shown on the panel.
-          line("JOIN WIFI \"${ap_ssid}\"", id(font_small), id(c_text), 19, 2);
+          line("JOIN WIFI \"${ap_ssid}\"", id(font_small), id(c_text), 19, 4);
           it.print(W / 2, 30, id(font_small), id(c_clock), TextAlign::BASELINE_CENTER, "192.168.4.1");
         } else {
           it.print(W / 2, 19, id(font_small), id(c_text), TextAlign::BASELINE_CENTER, "CONNECTING");
@@ -568,7 +568,7 @@ display:
 
       // 2) Alert set from the web UI or curl (Alert text entity).
       if ((int32_t) (id(alert_until) - now_ms) > 0) {
-        line(id(alert_text), id(font_big), id(c_alert), 25, 1);
+        line(id(alert_text), id(font_big), id(c_alert), 25, 2);
         return;
       }
 
@@ -630,21 +630,21 @@ display:
           if (date[0]) s += (s.empty() ? "" : "  ") + std::string(date);
         }
         it.start_clipping(32, 24, 64, 32);
-        scroll_in(s, id(font_small), id(c_text), 31, 32, 32, 1);
+        scroll_in(s, id(font_small), id(c_text), 31, 32, 32, 2);
         it.end_clipping();
         return;
       }
 
       // 4) Big scrolling message.
       if (mode == 3) {
-        line(id(message).state, id(font_big), id(c_text), 25, 1);
+        line(id(message).state, id(font_big), id(c_text), 25, 2);
         return;
       }
 
       // 5) Clock on top, message or date underneath.
       if (!t.is_valid()) {
         it.print(W / 2, 20, id(font_big), id(c_dim), TextAlign::BASELINE_CENTER, "--:--");
-        line("SYNCING TIME", id(font_small), id(c_text), 31, 2);
+        line("SYNCING TIME", id(font_small), id(c_text), 31, 4);
         return;
       }
       it.print(W / 2, 20, id(font_big), id(c_clock), TextAlign::BASELINE_CENTER, hhmm);
@@ -655,7 +655,7 @@ display:
       if (bar > 0) it.line(0, 22, bar - 1, 22, id(c_bar));
 
       if (mode == 1 && !id(message).state.empty()) {
-        line(id(message).state, id(font_small), id(c_text), 31, 1);
+        line(id(message).state, id(font_small), id(c_text), 31, 2);
       } else {
-        line(date, id(font_small), id(c_text), 31, 1);
+        line(date, id(font_small), id(c_text), 31, 2);
       }
