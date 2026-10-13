@@ -230,6 +230,10 @@ globals:
   - id: alert_until
     type: uint32_t
     initial_value: "0"
+  # Display frames drawn; scrolling advances per frame for even steps
+  - id: frame
+    type: uint32_t
+    initial_value: "0"
   # Weather state, filled in by the wx_update script
   - id: wx_lat
     type: float
@@ -492,6 +496,11 @@ display:
     panel_height: 32
     double_buffer: true
     brightness: 80
+    # Redraw ~33x/s (ESPHome's default is once a second, which makes scrolling
+    # jump). 7-bit colour roughly doubles the panel refresh (~150 Hz vs 76 Hz),
+    # so scrolled frames land evenly; the colour loss is invisible here.
+    update_interval: 30ms
+    bit_depth: 7
     # Pin map verified on this hardware (photo-diagnosed 2026-10-13):
     #  - The board is silkscreened V1.2 but its address/B2 wiring matches the
     #    AZSMZ V1.5 table: B=GPIO13, D=GPIO27, B2=GPIO12.
@@ -521,11 +530,14 @@ display:
     lambda: |-
       const int W = 64;
       const uint32_t now_ms = millis();
+      const uint32_t fr = ++id(frame);
 
       // Text in the window [x0, x0 + ww): centred if it fits, otherwise it
-      // scrolls right-to-left. Callers clip when the window isn't full width.
+      // scrolls right-to-left, 1 px every `frames_per_px` frames (frame-locked,
+      // so every step is the same size and the motion stays even).
+      // Callers clip when the window isn't full width.
       auto scroll_in = [&](const std::string &s, font::Font *f, Color c, int baseline,
-                           int x0, int ww, uint32_t ms_per_px) {
+                           int x0, int ww, uint32_t frames_per_px) {
         if (s.empty()) return;
         int x1, y1, w, h;
         it.get_text_bounds(0, baseline, s.c_str(), f, TextAlign::BASELINE_LEFT, &x1, &y1, &w, &h);
@@ -533,12 +545,12 @@ display:
           it.print(x0 + ww / 2, baseline, f, c, TextAlign::BASELINE_CENTER, s.c_str());
         } else {
           int span = w + ww;
-          int x = x0 + ww - (int) ((now_ms / ms_per_px) % (uint32_t) span);
+          int x = x0 + ww - (int) ((fr / frames_per_px) % (uint32_t) span);
           it.print(x, baseline, f, c, TextAlign::BASELINE_LEFT, s.c_str());
         }
       };
-      auto line = [&](const std::string &s, font::Font *f, Color c, int baseline, uint32_t ms_per_px) {
-        scroll_in(s, f, c, baseline, 0, W, ms_per_px);
+      auto line = [&](const std::string &s, font::Font *f, Color c, int baseline, uint32_t frames_per_px) {
+        scroll_in(s, f, c, baseline, 0, W, frames_per_px);
       };
 
       // 1) Not on WiFi: the panel explains how to set it up.
@@ -546,7 +558,7 @@ display:
         if (wifi::global_wifi_component->is_ap_active()) {
           it.print(W / 2, 8, id(font_small), id(c_clock), TextAlign::BASELINE_CENTER, "WIFI SETUP");
           // The hotspot password is deliberately not shown on the panel.
-          line("JOIN WIFI \"${ap_ssid}\"", id(font_small), id(c_text), 19, 40);
+          line("JOIN WIFI \"${ap_ssid}\"", id(font_small), id(c_text), 19, 2);
           it.print(W / 2, 30, id(font_small), id(c_clock), TextAlign::BASELINE_CENTER, "192.168.4.1");
         } else {
           it.print(W / 2, 19, id(font_small), id(c_text), TextAlign::BASELINE_CENTER, "CONNECTING");
@@ -556,7 +568,7 @@ display:
 
       // 2) Alert set from the web UI or curl (Alert text entity).
       if ((int32_t) (id(alert_until) - now_ms) > 0) {
-        line(id(alert_text), id(font_big), id(c_alert), 25, 20);
+        line(id(alert_text), id(font_big), id(c_alert), 25, 1);
         return;
       }
 
@@ -618,21 +630,21 @@ display:
           if (date[0]) s += (s.empty() ? "" : "  ") + std::string(date);
         }
         it.start_clipping(32, 24, 64, 32);
-        scroll_in(s, id(font_small), id(c_text), 31, 32, 32, 30);
+        scroll_in(s, id(font_small), id(c_text), 31, 32, 32, 1);
         it.end_clipping();
         return;
       }
 
       // 4) Big scrolling message.
       if (mode == 3) {
-        line(id(message).state, id(font_big), id(c_text), 25, 20);
+        line(id(message).state, id(font_big), id(c_text), 25, 1);
         return;
       }
 
       // 5) Clock on top, message or date underneath.
       if (!t.is_valid()) {
         it.print(W / 2, 20, id(font_big), id(c_dim), TextAlign::BASELINE_CENTER, "--:--");
-        line("SYNCING TIME", id(font_small), id(c_text), 31, 40);
+        line("SYNCING TIME", id(font_small), id(c_text), 31, 2);
         return;
       }
       it.print(W / 2, 20, id(font_big), id(c_clock), TextAlign::BASELINE_CENTER, hhmm);
@@ -643,7 +655,7 @@ display:
       if (bar > 0) it.line(0, 22, bar - 1, 22, id(c_bar));
 
       if (mode == 1 && !id(message).state.empty()) {
-        line(id(message).state, id(font_small), id(c_text), 31, 30);
+        line(id(message).state, id(font_small), id(c_text), 31, 1);
       } else {
-        line(date, id(font_small), id(c_text), 31, 30);
+        line(date, id(font_small), id(c_text), 31, 1);
       }

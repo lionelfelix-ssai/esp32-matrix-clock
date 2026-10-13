@@ -147,6 +147,10 @@ OTA is encrypted with `ota_key` from `secrets.yaml`, and the web server's plaint
 - **No Bluetooth.** On the original ESP32, the BLE stack and the HUB75 DMA buffers don't fit in RAM together. BLE failed to start, and free heap fell to about 80 bytes. Without BLE, and with `sram1_as_iram`, free heap is about 150 KB.
 - **No Home Assistant API.** It's a standalone device. With the API enabled, ESPHome reboots every 15 minutes when no client connects.
 - **WiFi `reboot_timeout: 0s`** keeps the clock running and keeping time if the network goes away.
+- **Smooth scrolling:** ESPHome's default display `update_interval` is 1 s, which makes scrolling text jump about 30 px at a time.
+  - The display now redraws every 30 ms (about 33 fps), and scrolling advances exactly 1 px per frame, so every step is the same size.
+  - `bit_depth: 7` doubles the panel refresh from 76 Hz to 152 Hz, so frames land evenly. It also frees about 30 KB of DMA RAM.
+  - The scroll still pauses for a few seconds during each weather fetch.
 
 ## License
 
