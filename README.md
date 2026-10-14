@@ -123,9 +123,9 @@ Then reference the new file in the `image:` block of `matrix-clock.yaml` and run
 | Button | Action |
 |---|---|
 | On-board **Flash** (IO0) | Click: next screen |
-| External, **IO21 to GND** (4-pin header: GND, GND, IO21, 3.3V) | Click: next screen. Double-click: previous screen. Hold 1 s: brightness low/medium/high |
+| External, **IO21 to 3.3V** (4-pin header: GND, GND, IO21, 3.3V) | Click: next screen. Double-click: previous screen. Hold 1 s: brightness low/medium/high |
 
-IO21 is the only spare GPIO on the board; everything else is used by the panel or the SD slot. The Flash button also has through-hole pads if you want to mount a front-panel button there. Don't hold Flash while powering up, because that enters the bootloader.
+IO21 is the only spare GPIO on the board; everything else is used by the panel or the SD slot. The firmware reads IO21 with a pull-down, so the switch goes between IO21 and 3.3V; that's how the test unit is wired. To wire it to GND instead, change the pin to `pullup: true` and `inverted: true`. The Flash button also has through-hole pads if you want to mount a front-panel button there. Don't hold Flash while powering up, because that enters the bootloader.
 
 ## Power
 

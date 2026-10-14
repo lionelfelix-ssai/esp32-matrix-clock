@@ -18,8 +18,8 @@
 #     over USB from https://web.esphome.io
 #   - Secrets (hotspot password, OTA key) live in secrets.yaml, which is
 #     not committed. Copy secrets.example.yaml to secrets.yaml first.
-#   - Buttons: on-board Flash (IO0) = next scene. External button on the
-#     header's IO21 to GND: click = next, double-click = previous,
+#   - Buttons: on-board Flash (IO0) = next scene. External button between
+#     the header's IO21 and 3.3V: click = next, double-click = previous,
 #     hold 1s = cycle brightness (low / medium / high)
 #   - Free-heap diagnostics (the original ESP32 is tight on RAM)
 #   - OTA updates after the first USB flash
@@ -368,16 +368,18 @@ binary_sensor:
           id: display_mode
           cycle: true
 
-  # External momentary button: header pin IO21 to either GND pin.
+  # External momentary button between the header's IO21 and 3.3V pins (as
+  # wired on this unit; verified 2026-10-13). IO21 is pulled low, so a press
+  # reads high. If you rewire it to GND instead, use pullup: true and
+  # inverted: true.
   - platform: gpio
     id: ext_button
     name: External button
     pin:
       number: GPIO21
-      inverted: true
       mode:
         input: true
-        pullup: true
+        pulldown: true
     filters:
       - delayed_on_off: 20ms
     on_multi_click:
