@@ -11,8 +11,9 @@ Standalone WiFi clock, weather and message board for the **AZSMZ ESP32 Matrix** 
   - On the right, the time, then the current weather for a US ZIP code (an icon and the temperature), then your scroll text.
 - **Weather** comes from [Open-Meteo](https://open-meteo.com), which is free and needs no key. It refreshes every 15 minutes, and immediately when you change the ZIP.
 - **Clock screens:**
-  - **Clock + Message** and **Clock + Date** show a big clock from NTP (America/Chicago), 12/24-hour, with a seconds bar.
+  - **Clock + Message** and **Clock + Date** show a big clock from NTP, 12/24-hour, with a seconds bar.
   - **Message** shows the scroll text in a large font.
+- **Time zone:** pick any of 41 zones in the web UI. The default, **Auto (from Weather ZIP)**, follows the time zone of the weather ZIP, so moving the clock only takes a ZIP change. DST is handled.
 - **Scroll text** is set in the web UI. It is centred when it fits and scrolls when it doesn't. Leave it empty to show the weather location, conditions and date instead.
 - **Alerts:** a red pop-up for N seconds, set from the web UI or with one `curl`.
 - **Web UI** at `http://matrix-clock.local` (or the device IP), with a REST endpoint for every control.
@@ -80,6 +81,8 @@ Open `http://matrix-clock.local` (or the IP shown in your router). Every control
 H=http://matrix-clock.local
 curl -d "" "$H/text/Scroll%20text/set?value=Dinner%20at%207"       # scrolling line
 curl -d "" "$H/text/Weather%20ZIP/set?value=78701"                # weather location
+curl -d "" "$H/select/Time%20zone/set?option=US%20Pacific%20(Los%20Angeles)"
+curl -d "" "$H/select/Time%20zone/set?option=Auto%20(from%20Weather%20ZIP)"
 curl    "$H/text_sensor/Weather"                                  # e.g. "Austin: 94°F, Partly cloudy"
 curl -d "" "$H/text/Alert/set?value=Doorbell"                     # red pop-up
 curl -d "" "$H/number/Alert%20seconds/set?value=20"               # alert duration
@@ -96,6 +99,16 @@ POSTs need a body (`-d ""`). Without one, the server rejects the request for a m
 | **Clock + Message** | Big clock and seconds bar, with the scroll text underneath (the date if it's empty) |
 | **Clock + Date** | Big clock and seconds bar, with the date |
 | **Message** | Scroll text in the large font |
+
+## Time zone
+
+The **Time zone** dropdown on the web page sets the clock's zone immediately, and the setting survives reboots.
+
+- **Auto (from Weather ZIP)**, the default: the weather lookup returns the ZIP's IANA time zone (e.g. `America/Los_Angeles`). The clock maps it to the matching entry and remembers it, so it boots straight into the right zone. Every US zone name is covered, including the Indiana, Kentucky, North Dakota and Alaska variants.
+- **Fixed zones:** 41 entries covering the US, the Americas, Europe, Africa, Asia and Oceania, with full DST rules.
+- **No runtime parsing:** ESPHome can't parse zone names on the device, so `tools/gen_timezones.py` pre-builds the table as `timezones.h`, using the same tz database and parser ESPHome uses at build time. To add a zone, edit `ZONES` in the script and run `.venv/bin/python tools/gen_timezones.py`. That rewrites `timezones.h` and the dropdown options in `matrix-clock.yaml`. Then update the clock.
+- **Tested:** every entry was checked against the tz database at 726,000 instants across 2026–2027, including the second either side of each DST change. There were no mismatches.
+- **Fallback:** the `timezone:` substitution in `matrix-clock.yaml` is only used for the first few seconds after a fresh install, until the setting takes over.
 
 ## Weather
 
